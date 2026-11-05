@@ -70,16 +70,26 @@ actor ChatDatabase {
 
     // MARK: - Queries
 
-    func latestMessageRowID() throws -> Int64 {
+    /// Changes whenever another connection (Messages) commits to the database: new rows
+    /// *and* in-place updates such as delivery receipts, reads, edits and unsends.
+    func dataVersion() throws -> Int64 {
         try open()
-        return try rows("SELECT IFNULL(MAX(ROWID), 0) FROM message") { $0.int64(0) }.first ?? 0
+        return try rows("PRAGMA data_version") { $0.int64(0) }.first ?? 0
     }
 
     func recentChats(limit: Int = 60) throws -> [ChatSummary] {
         try open()
-        struct Row { let rowID: Int64; let guid: String; let identifier: String; let name: String?; let service: String; let date: Int64 }
+        struct Row {
+            let rowID: Int64; let guid: String; let identifier: String; let name: String?; let service: String; let date: Int64
+            let properties: Data?
+        }
+        // `chat.service_name` is unreliable for `any;-;…` rows (often "SMS" for an iMessage
+        // conversation), so the service shown is the one the latest message actually used.
         let chatRows = try rows("""
-            SELECT c.ROWID, c.guid, c.chat_identifier, c.display_name, c.service_name, MAX(cmj.message_date)
+            SELECT c.ROWID, c.guid, c.chat_identifier, c.display_name,
+                   COALESCE((SELECT m.service FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
+                             WHERE j.chat_id = c.ROWID ORDER BY j.message_date DESC LIMIT 1), c.service_name),
+                   MAX(cmj.message_date), c.properties
             FROM chat c
             JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
             GROUP BY c.ROWID
@@ -87,9 +97,28 @@ actor ChatDatabase {
             LIMIT ?
             """, [.int(Int64(limit))]) { s in
             Row(rowID: s.int64(0), guid: s.string(1) ?? "", identifier: s.string(2) ?? "",
-                name: s.string(3).flatMap { $0.isEmpty ? nil : $0 }, service: s.string(4) ?? "iMessage", date: s.int64(5))
+                name: s.string(3).flatMap { $0.isEmpty ? nil : $0 }, service: s.string(4) ?? "iMessage", date: s.int64(5),
+                properties: s.data(6))
         }
         guard !chatRows.isEmpty else { return [] }
+
+        // Group photos: `chat.properties` (a binary plist) names an attachment by guid.
+        var photoGUIDs: [Int64: String] = [:]
+        for row in chatRows {
+            guard let data = row.properties,
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let guid = plist["groupPhotoGuid"] as? String, !guid.isEmpty else { continue }
+            photoGUIDs[row.rowID] = guid
+        }
+        var photoPaths: [String: String] = [:]
+        if !photoGUIDs.isEmpty {
+            let guids = Array(Set(photoGUIDs.values))
+            try rows("SELECT guid, filename FROM attachment WHERE guid IN (\(placeholders(guids.count)))",
+                     guids.map { .text($0) }) { s in (s.string(0) ?? "", s.string(1)) }
+                .forEach { guid, path in
+                    if let path { photoPaths[guid] = (path as NSString).expandingTildeInPath }
+                }
+        }
 
         let ids = chatRows.map(\.rowID)
         var participants: [Int64: [String]] = [:]
@@ -108,7 +137,8 @@ actor ChatDatabase {
         return chatRows.map { row in
             ChatSummary(rowID: row.rowID, guid: row.guid, identifier: row.identifier, displayName: row.name,
                         service: row.service, participants: participants[row.rowID] ?? [row.identifier],
-                        lastMessageDate: Self.date(fromAppleTime: row.date))
+                        lastMessageDate: Self.date(fromAppleTime: row.date),
+                        groupPhotoPath: photoGUIDs[row.rowID].flatMap { photoPaths[$0] })
         }
     }
 
@@ -120,18 +150,24 @@ actor ChatDatabase {
         let audioColumn = messageColumns.contains("is_audio_message") ? "m.is_audio_message" : "0"
         let retractedColumn = messageColumns.contains("date_retracted") ? "m.date_retracted" : "0"
         let threadColumn = messageColumns.contains("thread_originator_guid") ? "m.thread_originator_guid" : "NULL"
+        let editedColumn = messageColumns.contains("date_edited") ? "m.date_edited" : "0"
+        let errorColumn = messageColumns.contains("error") ? "m.error" : "0"
+        let deliveredColumn = messageColumns.contains("is_delivered") ? "m.is_delivered" : "1"
+        let readColumn = messageColumns.contains("date_read") ? "m.date_read" : "0"
 
         struct Raw {
             let rowID: Int64, guid: String, text: String?, isFromMe: Bool, date: Int64, sender: String?
             let assocGUID: String?, assocType: Int, emoji: String?, hasAttachments: Bool, isAudio: Bool, itemType: Int, retracted: Bool
             let replyTo: String?
+            let edited: Bool, error: Bool, delivered: Bool, dateRead: Int64
         }
 
         // Over-fetch so reactions don't crowd out real messages.
         let rawRows = try rows("""
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.is_from_me, m.date, h.id,
                    m.associated_message_guid, m.associated_message_type, \(emojiColumn),
-                   m.cache_has_attachments, \(audioColumn), m.item_type, \(retractedColumn), \(threadColumn)
+                   m.cache_has_attachments, \(audioColumn), m.item_type, \(retractedColumn), \(threadColumn),
+                   \(editedColumn), \(errorColumn), \(deliveredColumn), \(readColumn)
             FROM chat_message_join cmj
             JOIN message m ON m.ROWID = cmj.message_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -139,24 +175,25 @@ actor ChatDatabase {
             ORDER BY cmj.message_date DESC, m.ROWID DESC
             LIMIT ?
             """, chatRowIDs.map { .int($0) } + [.int(Int64(limit * 3))]) { s -> Raw in
-            // `text` can be missing or shorter than the real message (newer macOS keeps the
-            // full, possibly edited body only in `attributedBody`), so use whichever is longer.
+            // `attributedBody` is authoritative: newer macOS keeps the full body there, and after
+            // an edit it holds the current version while `text` can be missing, stale or shorter.
             var text = s.string(2)
-            if let body = s.data(3), let decoded = AttributedBodyDecoder.decode(body),
-               decoded.count > (text?.count ?? 0) {
+            if let body = s.data(3), let decoded = AttributedBodyDecoder.decode(body), !decoded.isEmpty {
                 text = decoded
             }
             return Raw(rowID: s.int64(0), guid: s.string(1) ?? UUID().uuidString, text: text, isFromMe: s.int64(4) != 0,
                        date: s.int64(5), sender: s.string(6), assocGUID: s.string(7), assocType: Int(s.int64(8)),
                        emoji: s.string(9), hasAttachments: s.int64(10) != 0, isAudio: s.int64(11) != 0,
                        itemType: Int(s.int64(12)), retracted: s.int64(13) != 0,
-                       replyTo: s.string(14).flatMap { $0.isEmpty ? nil : $0 })
+                       replyTo: s.string(14).flatMap { $0.isEmpty ? nil : $0 },
+                       edited: s.int64(15) != 0, error: s.int64(16) != 0, delivered: s.int64(17) != 0,
+                       dateRead: s.int64(18))
         }.reversed()
         // A message can be joined to more than one merged row; keep it once.
         var seenGUIDs = Set<String>()
         let raw = rawRows.filter { seenGUIDs.insert($0.guid).inserted }
 
-        let messageRows = raw.filter { $0.itemType == 0 && $0.assocType == 0 && !$0.retracted }
+        let messageRows = raw.filter { $0.itemType == 0 && $0.assocType == 0 }
         let reactionRows = raw.filter { (2000...2006).contains($0.assocType) || (3000...3006).contains($0.assocType) }
 
         let attachmentMap = try attachments(forMessageRowIDs: messageRows.filter(\.hasAttachments).map(\.rowID))
@@ -188,7 +225,19 @@ actor ChatDatabase {
                 reactions: Array((reactionState[r.guid] ?? [:]).values).sorted { $0.kind.rawValue < $1.kind.rawValue },
                 isAudioMessage: r.isAudio)
             message.replyToGUID = r.replyTo
-            guard message.trimmedText != nil || !message.attachments.isEmpty else { continue }
+            if r.isFromMe { message.delivery = Self.deliveryState(error: r.error, delivered: r.delivered, dateRead: r.dateRead) }
+            // Unsent messages keep their row with the body cleared. Older rows only set
+            // `date_edited`, so an edited row with nothing left in it counts as unsent too.
+            let empty = message.trimmedText == nil && message.attachments.isEmpty
+            if r.retracted || (r.edited && empty) {
+                message.text = nil
+                message.attachments = []
+                message.reactions = []
+                message.isUnsent = true
+            } else {
+                guard !empty else { continue }
+                message.isEdited = r.edited
+            }
             result.append(message)
         }
         return Array(result.suffix(limit))
@@ -233,6 +282,12 @@ actor ChatDatabase {
     }
 
     // MARK: - Helpers
+
+    static func deliveryState(error: Bool, delivered: Bool, dateRead: Int64) -> DeliveryState {
+        if error { return .notDelivered }
+        if dateRead > 0 { return .read(date(fromAppleTime: dateRead)) }
+        return delivered ? .delivered : .sent
+    }
 
     static func date(fromAppleTime raw: Int64) -> Date {
         let value = Double(raw)

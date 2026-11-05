@@ -23,7 +23,8 @@ CREATE TABLE message (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, guid TEXT UNIQUE 
                       handle_id INTEGER DEFAULT 0, is_from_me INTEGER DEFAULT 0, date INTEGER, is_read INTEGER DEFAULT 1,
                       item_type INTEGER DEFAULT 0, associated_message_guid TEXT, associated_message_type INTEGER DEFAULT 0,
                       associated_message_emoji TEXT, cache_has_attachments INTEGER DEFAULT 0, is_audio_message INTEGER DEFAULT 0,
-                      date_retracted INTEGER DEFAULT 0, thread_originator_guid TEXT);
+                      date_retracted INTEGER DEFAULT 0, thread_originator_guid TEXT, date_edited INTEGER DEFAULT 0,
+                      error INTEGER DEFAULT 0, is_delivered INTEGER DEFAULT 1, date_read INTEGER DEFAULT 0);
 CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER DEFAULT 0, PRIMARY KEY (chat_id, message_id));
 CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, guid TEXT UNIQUE NOT NULL, filename TEXT, uti TEXT,
                          mime_type TEXT, transfer_name TEXT);
@@ -71,14 +72,19 @@ add(0, "Half the time I don't even type I just talk", me=True, offset=t); t += 2
 add(0, "￼￼￼", me=True, offset=t, files=[("img1.jpg", "image/jpeg"), ("img2.jpg", "image/jpeg"), ("img3.jpg", "image/jpeg")]); t += 1
 g = add(0, "and you can throw anything right in my face too", me=True, offset=t); t += 20
 add(0, "Loved “and you can throw anything right in my face too”", offset=t, assoc=f"p:0/{g}", assoc_type=2000); t += 5
-add(0, "cool, didn't expect this!", offset=t); t += 20
+edited = add(0, "cool, didn't expect this!", offset=t); t += 20
+db.execute("UPDATE message SET date_edited = ? WHERE guid = ?", (apple_now(t), edited))
+unsent = add(0, "", offset=t); t += 5
+db.execute("UPDATE message SET date_retracted = ?, date_edited = ? WHERE guid = ?", (apple_now(t), apple_now(t), unsent))
 check = add(0, "check this then...", me=True, offset=t); t += 5
 add(0, "￼", me=True, offset=t, files=[("Screen Recording.mp4", "video/mp4")]); t += 20
 add(0, "ok stop, i love it!!", offset=t, read=0, reply_to=check); t += 20
 long_body = os.path.join(root, "body-long.bin")
 if os.path.exists(long_body):
     add(0, None, offset=t, body=open(long_body, "rb").read()); t += 20
-add(0, "Sure!! Also, a really long message to make sure nothing gets cut off: " + " ".join(["word%d" % i for i in range(60)]) + " — the end.", me=True, offset=t); t += 20
+last_mine = add(0, "Sure!! Also, a really long message to make sure nothing gets cut off: " + " ".join(["word%d" % i for i in range(60)]) + " — the end.", me=True, offset=t); t += 20
+
+db.execute("UPDATE message SET date_read = ? WHERE guid = ?", (apple_now(t), last_mine))
 
 # A second, older chat row for Tanya (as Messages keeps for SMS/iMessage) — OpenHoy merges it.
 cur = db.execute("INSERT INTO chat (guid, chat_identifier, service_name) VALUES (?, ?, 'iMessage')",

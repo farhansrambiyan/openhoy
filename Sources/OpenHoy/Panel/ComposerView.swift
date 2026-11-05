@@ -1,16 +1,47 @@
 import SwiftUI
 
-/// OpenHoy's composer: one rounded input bar — "+" menu, text, and a round send button.
-/// Voice / video recording and attachments appear above the bar, inside the same box.
+/// OpenHoy's composer: a glass "+" button beside a glass input field holding the text and a
+/// round send button. Voice / video recording and attachments appear inside the field, above
+/// the text. On macOS 26 the two pieces share one glass container, so they blend and morph.
 struct ComposerView: View {
     @ObservedObject var composer: ComposerModel
     let person: Person
+    var dropTargeted = false
     let onSend: () -> Void
     let onScreenRecord: () -> Void
 
     @FocusState private var textFocused: Bool
+    @Namespace private var glass
+
+    private static let fieldRadius: CGFloat = 20
 
     var body: some View {
+        GlassGroup(spacing: 10) {
+            HStack(alignment: .bottom, spacing: 8) {
+                leadingControl
+                    .glassID("leading", in: glass)
+                field
+                    .glassID("field", in: glass)
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: composer.mode)
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: composer.files)
+        .onAppear { textFocused = true }
+        .onChange(of: composer.focusToken) { textFocused = true }
+        .onChange(of: composer.mode) { _, mode in if mode == .idle { textFocused = true } }
+    }
+
+    @ViewBuilder private var leadingControl: some View {
+        switch composer.mode {
+        case .idle:
+            AddMenu(onFiles: composer.pickFiles, onVoice: composer.startVoice,
+                    onVideo: composer.startCamera, onScreen: onScreenRecord)
+        case .recordingVoice, .recordingCamera, .reviewingVoice:
+            RoundIconButton(symbol: "trash", help: "Discard (Esc)", size: 34, onGlass: true) { composer.discard() }
+        }
+    }
+
+    private var field: some View {
         VStack(alignment: .leading, spacing: 8) {
             if composer.mode == .recordingCamera, let camera = composer.camera {
                 CameraComposer(camera: camera)
@@ -31,26 +62,20 @@ struct ComposerView: View {
             }
             inputRow
         }
-        .padding(7)
-        .bubbleSurface(cornerRadius: 22, shadow: false)
-        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: composer.mode)
-        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: composer.files)
-        .onAppear { textFocused = true }
-        .onChange(of: composer.focusToken) { textFocused = true }
-        .onChange(of: composer.mode) { _, mode in if mode == .idle { textFocused = true } }
+        .padding(.leading, 8)
+        .padding([.vertical, .trailing], 2)
+        .frame(minHeight: 34)
+        .glassField(cornerRadius: Self.fieldRadius)
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: Self.fieldRadius, style: .continuous)
+                    .strokeBorder(Theme.accent, lineWidth: 2)
+            }
+        }
     }
 
     @ViewBuilder private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 6) {
-            // Leading control
-            switch composer.mode {
-            case .idle:
-                AddMenu(onFiles: composer.pickFiles, onVoice: composer.startVoice,
-                        onVideo: composer.startCamera, onScreen: onScreenRecord)
-            case .recordingVoice, .recordingCamera, .reviewingVoice:
-                RoundIconButton(symbol: "trash", help: "Discard (Esc)") { composer.discard() }
-            }
-
             // Middle
             Group {
                 switch composer.mode {
@@ -126,38 +151,49 @@ struct AddMenu: View {
             Button { onScreen() } label: { Label("Record Screen…", systemImage: "record.circle") }
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(Color.primary.opacity(0.75))
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.primary.opacity(0.08)))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(0.8))
+                .frame(width: 34, height: 34)
                 .contentShape(Circle())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
+        .glassControl(Circle())
         .help("Attach, voice note, video note or screen recording")
     }
 }
 
+/// Round icon button. `onGlass` makes it a standalone glass control; otherwise it sits
+/// inside a glass field and only shows a soft highlight on hover.
 struct RoundIconButton: View {
     let symbol: String
     let help: String
+    var size: CGFloat = 30
+    var onGlass = false
     let action: () -> Void
     @ViewState private var hovering = false
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.primary.opacity(hovering ? 0.9 : 0.7))
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.08)))
+                .frame(width: size, height: size)
+                .background {
+                    if !onGlass { Circle().fill(Color.primary.opacity(hovering ? 0.1 : 0)) }
+                }
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+        if onGlass {
+            button.glassControl(Circle())
+        } else {
+            button
+        }
     }
 }
 

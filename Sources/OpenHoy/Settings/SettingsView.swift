@@ -49,6 +49,7 @@ struct SettingsView: View {
                 header
                 permissions
                 pinned
+                appearance
                 options
             }
             .padding(24)
@@ -201,6 +202,24 @@ struct SettingsView: View {
         }
     }
 
+    private var appearance: some View {
+        SettingsSection(title: "Appearance") {
+            HStack(spacing: 10) {
+                ForEach(ThemeChoice.allCases) { choice in
+                    ThemeSwatch(choice: choice, selected: state.theme == choice) {
+                        withAnimation(.easeOut(duration: 0.15)) { state.theme = choice }
+                    }
+                }
+            }
+            Text(state.theme == .messages
+                 ? "Matches Messages: blue for iMessage, green for SMS."
+                 : state.theme == .systemAccent
+                    ? "Follows the accent colour in System Settings › Appearance."
+                    : "Colours your messages, the send button, the unread dot and the open chat's ring.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
     private var options: some View {
         SettingsSection(title: "Options") {
             Toggle("Send the transcript as text with voice notes", isOn: $state.sendTranscripts)
@@ -223,6 +242,56 @@ struct SettingsView: View {
 }
 
 // MARK: - Components
+
+/// A theme preview: an incoming and a sent bubble in that theme's colours.
+private struct ThemeSwatch: View {
+    let choice: ThemeChoice
+    let selected: Bool
+    let action: () -> Void
+    @ViewState private var hovering = false
+
+    var body: some View {
+        let palette = choice.palette
+        let sent = palette.sent.map { Color(nsColor: $0) }
+        Button(action: action) {
+            VStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Capsule().fill(Color.primary.opacity(0.12)).frame(width: 34, height: 12)
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        Capsule()
+                            .fill(LinearGradient(colors: sent.count == 1 ? [sent[0], sent[0]] : sent,
+                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 42, height: 12)
+                    }
+                    if let sms = palette.sms?.first {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            Capsule().fill(Color(nsColor: sms)).frame(width: 28, height: 12)
+                        }
+                    }
+                }
+                .padding(8)
+                .frame(height: 62)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(hovering ? 0.25 : 0.1),
+                                  lineWidth: selected ? 2 : 1))
+                Text(choice.title)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? .primary : .secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("\(choice.title) theme")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
 
 private struct PinnedRow: View {
     let chat: ChatSummary

@@ -21,6 +21,8 @@ struct ChatSummary: Identifiable, Hashable, Sendable, Codable {
     var mergedRowIDs: [Int64]? = nil
     /// Guid of the most recently active row — the one to send to.
     var latestGUID: String? = nil
+    /// The group photo set in Messages, if any.
+    var groupPhotoPath: String? = nil
 
     var id: String { guid }
     var allRowIDs: [Int64] { mergedRowIDs ?? [rowID] }
@@ -85,10 +87,26 @@ struct Reaction: Hashable, Sendable {
     let emoji: String?
 }
 
+/// Where a message is on its way out, as far as OpenHoy can honestly tell.
+/// Messages.app owns delivery; OpenHoy only reflects what `chat.db` records.
 enum DeliveryState: Hashable, Sendable {
-    case delivered
+    /// Handing the message to Messages.app (optimistic bubble).
     case sending
+    /// Messages accepted it; no delivery receipt yet.
+    case sent
+    case delivered
+    case read(Date)
+    /// Messages recorded a send error (`message.error != 0`). Retry happens in Messages.
+    case notDelivered
+    /// OpenHoy couldn't hand it to Messages at all (AppleScript error). Dismissable.
     case failed(String)
+
+    var isFailure: Bool {
+        switch self {
+        case .notDelivered, .failed: return true
+        default: return false
+        }
+    }
 }
 
 struct ChatMessage: Identifiable, Hashable, Sendable {
@@ -107,6 +125,10 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
     var transcript: String? = nil
     /// Guid of the message this one replies to (Messages' inline-reply threads).
     var replyToGUID: String? = nil
+    /// The sender edited this message; `text` is the current version.
+    var isEdited = false
+    /// The sender unsent this message; it renders as a small notice, not a bubble.
+    var isUnsent = false
 
     var trimmedText: String? {
         guard let text else { return nil }

@@ -3,11 +3,22 @@
 #   scripts/build-app.sh            # release build
 #   scripts/build-app.sh --install  # …and copy to ~/Applications, then launch
 #   SIGN_IDENTITY="Developer ID Application: …" scripts/build-app.sh
+#
+# Signing: macOS ties Full Disk Access and other privacy grants to the signature, so an
+# ad-hoc build loses them on every rebuild. Unless SIGN_IDENTITY is set, the first
+# "Developer ID Application" or "Apple Development" certificate in your keychain is used,
+# which keeps grants across rebuilds. SIGN_IDENTITY=- forces an ad-hoc signature.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${CONFIG:-release}"
 APP="build/OpenHoy.app"
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  SIGN_IDENTITY="$(grep -m1 -o '"Developer ID Application: [^"]*"' <<<"$IDENTITIES" \
+    || grep -m1 -o '"Apple Development: [^"]*"' <<<"$IDENTITIES" || true)"
+  SIGN_IDENTITY="${SIGN_IDENTITY//\"/}"
+fi
 IDENTITY="${SIGN_IDENTITY:--}"
 
 echo "› swift build ($CONFIG)"

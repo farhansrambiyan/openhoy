@@ -15,7 +15,7 @@ A menu bar messenger for macOS that runs on **iMessage**. It needs no account, n
   - 📎 **Files and photos**, from **+** › Attach Files, pasted with ⌘V, or **dragged onto someone's avatar** in the menu bar (or onto the panel).
   - 🎥 **Video notes** from your camera, with a round live preview.
   - ⏺ **Screen recordings.** *Record Screen with Microphone ▾ Camera ▾*. Click a window, drag to select an area, or press Esc to cancel. A round face bubble follows you while recording, and the menu bar shows a red stop button.
-- **Messages from your history:** text, photos, videos, voice notes, files and tapbacks (♥ 👍 👎 HA ‼ ? and emoji). New messages appear within about 1.5 seconds.
+- **Messages from your history:** text, photos, videos, voice notes, files and tapbacks (♥ 👍 👎 HA ‼ ? and emoji). Edited messages show *Edited*, unsent ones a short notice, and your latest message shows *Sent*, *Delivered*, *Read* or *Not Delivered* exactly as Messages recorded it. New messages and changes appear almost immediately (OpenHoy watches the database instead of polling it).
 
 ## Install
 
@@ -59,7 +59,7 @@ On first launch the settings window walks you through the permissions:
 
 The four most recent conversations are pinned automatically. Change them in Settings or by right-clicking the avatars.
 
-> The build is ad-hoc signed. macOS ties privacy permissions to the signature, so **after rebuilding you may need to re-grant Full Disk Access**. To avoid this, sign with a stable identity: `SIGN_IDENTITY="Apple Development: …" scripts/build-app.sh`.
+> macOS ties privacy permissions to the code signature. `scripts/build-app.sh` signs with the first *Developer ID Application* or *Apple Development* certificate in your keychain, so permissions survive rebuilds. Without one it falls back to an ad-hoc signature, and **after rebuilding you may need to re-grant Full Disk Access**. Choose a certificate with `SIGN_IDENTITY="…"`, or force ad-hoc with `SIGN_IDENTITY=-`.
 
 ### Troubleshooting: "can't give access to Messages"
 

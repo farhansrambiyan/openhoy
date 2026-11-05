@@ -43,6 +43,13 @@ final class AppState: ObservableObject {
     @Published var panelExpanded: Bool {
         didSet { UserDefaults.standard.set(panelExpanded, forKey: "panelExpanded") }
     }
+    /// Colour theme (Settings › Appearance).
+    @Published var theme: ThemeChoice {
+        didSet {
+            Theme.choice = theme
+            UserDefaults.standard.set(theme.rawValue, forKey: Keys.theme)
+        }
+    }
     @Published var sendTranscripts: Bool {
         didSet { UserDefaults.standard.set(sendTranscripts, forKey: Keys.sendTranscripts) }
     }
@@ -54,9 +61,13 @@ final class AppState: ObservableObject {
     private var guidAliases: [String: String] = [:]
     private var composers: [String: ComposerModel] = [:]
     private var lastSeenRowID: [String: Int64]
-    private var latestRowID: Int64 = -1
+    private var dataVersion: Int64 = -1
     private var isRefreshing = false
-    private var timer: Timer?
+    /// A refresh was requested while one was running; run again when it finishes.
+    private var refreshQueued = false
+    private var watcher: DatabaseWatcher?
+    /// Safety net in case a file event is missed (e.g. the database is replaced).
+    private var fallbackTimer: Timer?
     private var personCache: [String: Person] = [:]
     private var sentTranscripts: [String]
 
@@ -66,12 +77,16 @@ final class AppState: ObservableObject {
         static let lastSeen = "lastSeenRowIDs"
         static let sendTranscripts = "sendTranscripts"
         static let transcripts = "sentTranscripts"
+        static let theme = "theme"
     }
 
     private init() {
         let defaults = UserDefaults.standard
         pinnedGUIDs = defaults.stringArray(forKey: Keys.pinned) ?? []
         sendTranscripts = defaults.object(forKey: Keys.sendTranscripts) as? Bool ?? true
+        let savedTheme = defaults.string(forKey: Keys.theme).flatMap(ThemeChoice.init(rawValue:)) ?? .messages
+        theme = savedTheme
+        Theme.choice = savedTheme
         panelExpanded = defaults.bool(forKey: "panelExpanded")
         lastSeenRowID = (defaults.dictionary(forKey: Keys.lastSeen) as? [String: Int64]) ?? [:]
         sentTranscripts = defaults.stringArray(forKey: Keys.transcripts) ?? []
@@ -94,7 +109,10 @@ final class AppState: ObservableObject {
         }
         MessageSender.pruneOutbox()
         Task { await refresh(force: true) }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        watcher = DatabaseWatcher(directory: database.url.deletingLastPathComponent()) { [weak self] in
+            Task { @MainActor in await self?.refresh() }
+        }
+        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
     }
@@ -167,14 +185,25 @@ final class AppState: ObservableObject {
     }
 
     func refresh(force: Bool = false) async {
-        guard !isRefreshing else { return }
+        guard !isRefreshing else {
+            refreshQueued = true
+            return
+        }
         isRefreshing = true
-        defer { isRefreshing = false }
+        await performRefresh(force: force)
+        while refreshQueued {
+            refreshQueued = false
+            await performRefresh(force: true)
+        }
+        isRefreshing = false
+    }
+
+    private func performRefresh(force: Bool) async {
         do {
-            let latest = try await database.latestMessageRowID()
-            let changed = latest != latestRowID
+            let version = try await database.dataVersion()
+            let changed = version != dataVersion
             if changed || force {
-                latestRowID = latest
+                dataVersion = version
                 let chats = mergeConversations(try await database.recentChats(limit: 150))
                 recentChats = chats
                 for chat in chats { knownChats[chat.guid] = chat }
@@ -254,7 +283,8 @@ final class AppState: ObservableObject {
                                displayName: primary.displayName ?? latest.displayName, service: latest.service,
                                participants: latest.isGroup ? latest.participants : [participants[0]],
                                lastMessageDate: latest.lastMessageDate,
-                               mergedRowIDs: members.map(\.rowID), latestGUID: latest.guid)
+                               mergedRowIDs: members.map(\.rowID), latestGUID: latest.guid,
+                               groupPhotoPath: primary.groupPhotoPath ?? latest.groupPhotoPath)
         }
     }
 
@@ -280,6 +310,9 @@ final class AppState: ObservableObject {
             let firsts = zip(chat.participants, infos).map { handle, info in info?.firstName ?? ContactResolver.prettyHandle(handle) }
             name = chat.displayName ?? firsts.prefix(3).joined(separator: ", ") + (firsts.count > 3 ? " +\(firsts.count - 3)" : "")
             firstName = chat.displayName ?? (firsts.count == 2 ? firsts.joined(separator: " & ") : "the group")
+            // The group photo set in Messages, else the members' own contact photos.
+            image = chat.groupPhotoPath.flatMap { NSImage(contentsOfFile: $0) }
+                ?? Self.groupComposite(infos.compactMap { $0?.imageData.flatMap(NSImage.init(data:)) })
         } else {
             let info = infos.first ?? nil
             name = info?.fullName ?? ContactResolver.prettyHandle(chat.primaryHandle)
@@ -294,6 +327,39 @@ final class AppState: ObservableObject {
                             initials: initials, hue: hue)
         personCache[chat.guid] = person
         return person
+    }
+
+    /// Two member photos overlapping diagonally (like Messages); one photo as is.
+    static func groupComposite(_ photos: [NSImage]) -> NSImage? {
+        guard let first = photos.first else { return nil }
+        guard photos.count > 1 else { return first }
+        let side: CGFloat = 128, small = side * 0.64
+        return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            func draw(_ image: NSImage, in rect: NSRect, ring: Bool) {
+                NSGraphicsContext.saveGraphicsState()
+                let circle = NSBezierPath(ovalIn: rect)
+                circle.addClip()
+                let size = image.size
+                let scale = max(rect.width / max(size.width, 1), rect.height / max(size.height, 1))
+                let drawSize = NSSize(width: size.width * scale, height: size.height * scale)
+                image.draw(in: NSRect(x: rect.midX - drawSize.width / 2, y: rect.midY - drawSize.height / 2,
+                                      width: drawSize.width, height: drawSize.height))
+                NSGraphicsContext.restoreGraphicsState()
+                if ring {
+                    // Thin gap so the front photo reads as separate from the one behind it.
+                    NSGraphicsContext.saveGraphicsState()
+                    NSGraphicsContext.current?.compositingOperation = .destinationOut
+                    let gap = NSBezierPath(ovalIn: rect.insetBy(dx: -4, dy: -4))
+                    gap.append(NSBezierPath(ovalIn: rect).reversed)
+                    NSColor.black.setFill()
+                    gap.fill()
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+            }
+            draw(photos[0], in: NSRect(x: 0, y: side - small, width: small, height: small), ring: false)
+            draw(photos[1], in: NSRect(x: side - small, y: 0, width: small, height: small), ring: true)
+            return true
+        }
     }
 
     /// Same colour for the same person on every launch (`hashValue` is randomised per process).
@@ -398,7 +464,8 @@ final class AppState: ObservableObject {
             }
             updatePending(chat.guid) { message in
                 guard optimistic.contains(where: { $0.id == message.id }) else { return }
-                message.delivery = failed[message.id].map { .failed($0) } ?? .delivered
+                // Accepted by Messages is all we know here; chat.db reports delivery and reads.
+                message.delivery = failed[message.id].map { .failed($0) } ?? .sent
             }
             if MessageSender.isDryRun {
                 // No real Messages round-trip in dry-run mode — keep the bubbles as if sent.
@@ -423,7 +490,7 @@ final class AppState: ObservableObject {
         guard var list = pending[guid], !list.isEmpty, !MessageSender.isDryRun else { return }
         let mine = loaded.filter(\.isFromMe)
         list.removeAll { local in
-            guard local.delivery == .delivered else { return false }
+            guard local.delivery == .sent else { return false }
             if Date().timeIntervalSince(local.date) > 90 { return true }
             return mine.contains { real in
                 real.date > local.date.addingTimeInterval(-15) &&

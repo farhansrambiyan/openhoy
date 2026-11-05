@@ -9,6 +9,8 @@ struct MessageRow: View {
     /// The message this one answers (if it's loaded), for the quote above the bubble.
     var repliedTo: ChatMessage? = nil
     var isReply = false
+    /// Your newest message: show its delivery state ("Delivered", "Read 2:14 PM"…) under it.
+    var showsStatus = false
     @EnvironmentObject private var state: AppState
 
     static let avatarSize: CGFloat = 24
@@ -27,6 +29,20 @@ struct MessageRow: View {
     }
 
     var body: some View {
+        if message.isUnsent {
+            Text(fromMe ? "You unsent a message" : "\(chat.isGroup ? state.senderName(message.sender) : state.person(for: chat).firstName) unsent a message")
+                .font(.system(size: 11))
+                .italic()
+                .foregroundStyle(Theme.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .help(message.date.formatted(date: .abbreviated, time: .shortened))
+        } else {
+            bubbleRow
+        }
+    }
+
+    private var bubbleRow: some View {
         HStack(alignment: .bottom, spacing: 6) {
             if fromMe { Spacer(minLength: 48) } else if showsAvatars { avatarColumn }
             VStack(alignment: alignment, spacing: 6) {
@@ -74,14 +90,50 @@ struct MessageRow: View {
         }
     }
 
+    /// "Edited", and for your own messages the delivery state Messages recorded.
+    private var statusText: String? {
+        var parts: [String] = []
+        if message.isEdited { parts.append("Edited") }
+        if fromMe && showsStatus {
+            switch message.delivery {
+            case .sending: parts.append("Sending…")
+            case .sent: parts.append("Sent")
+            case .delivered: parts.append("Delivered")
+            case .read(let date):
+                let when = Calendar.current.isDateInToday(date)
+                    ? date.formatted(date: .omitted, time: .shortened)
+                    : date.formatted(.dateTime.month(.abbreviated).day())
+                parts.append("Read \(when)")
+            case .notDelivered, .failed: break
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     @ViewBuilder private var deliveryFooter: some View {
+        if message.delivery == .notDelivered {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
+                Text("Not Delivered").foregroundStyle(Theme.secondary)
+            }
+            .font(.system(size: 11))
+            .help("Messages couldn't deliver this. Open it in Messages to try again.")
+            .padding(.horizontal, 10)
+        } else if let statusText {
+            Text(statusText)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 10)
+                .padding(.top, -3)
+                .transition(.opacity)
+        }
         if case .failed(let reason) = message.delivery {
             Button {
                 state.dismissFailed(message, in: chat.guid)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-                    Text("Not delivered · dismiss").foregroundStyle(Theme.secondary)
+                    Text("Couldn't hand to Messages · dismiss").foregroundStyle(Theme.secondary)
                 }
                 .font(.system(size: 11))
             }

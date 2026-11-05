@@ -11,7 +11,9 @@ struct ChatPanelRoot: View {
         Group {
             if let guid = state.openChatGUID, let chat = state.chat(guid: guid) {
                 ChatPanelView(chat: chat, composer: state.composer(for: guid), onScreenRecord: { onScreenRecord(chat) })
-                    .id(guid)
+                    // A theme change rebuilds the card so every colour picks it up.
+                    .id("\(guid)|\(state.theme.rawValue)")
+                    .environment(\.isSMSChat, !ServiceChip.isIMessage(chat.service))
                     // Always lay out at full natural height, so the window grows to fit
                     // (instead of the content being squeezed into the window's current size).
                     .fixedSize(horizontal: false, vertical: true)
@@ -33,6 +35,8 @@ struct ChatPanelView: View {
     @EnvironmentObject private var state: AppState
     @ViewState private var listHeight: CGFloat
     @ViewState private var dropTargeted = false
+    /// Which list edges have more messages beyond them (and so get a soft fade).
+    @ViewState private var hiddenEdges = HiddenEdges()
 
     init(chat: ChatSummary, composer: ComposerModel, onScreenRecord: @escaping () -> Void) {
         self.chat = chat
@@ -71,16 +75,12 @@ struct ChatPanelView: View {
                     .padding(.vertical, 28)
             }
 
-            ComposerView(composer: composer, person: person,
+            ComposerView(composer: composer, person: person, dropTargeted: dropTargeted,
                          onSend: { state.send(from: composer) },
                          onScreenRecord: onScreenRecord)
-                .overlay {
-                    if dropTargeted {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .strokeBorder(Theme.accent, lineWidth: 2)
-                    }
-                }
-                .padding(8)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
         }
         .frame(width: width)
         .cardSurface()
@@ -97,8 +97,8 @@ struct ChatPanelView: View {
 
     @ViewBuilder
     private func messageList(_ messages: [ChatMessage]) -> some View {
-        let overflowing = listHeight > maxListHeight
         let byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let statusID = messages.last(where: { $0.isFromMe && !$0.isUnsent })?.id
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 3) {
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
@@ -120,7 +120,8 @@ struct ChatPanelView: View {
                         || (!message.isFromMe && previous?.sender != message.sender)
                     MessageRow(message: message, chat: chat, startsGroup: startsGroup,
                                repliedTo: message.replyToGUID.flatMap { byID[$0] },
-                               isReply: message.replyToGUID != nil)
+                               isReply: message.replyToGUID != nil,
+                               showsStatus: message.id == statusID)
                         .padding(.top, startsGroup && separator == nil && index > 0 ? 8 : 0)
                         .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                 }
@@ -135,17 +136,30 @@ struct ChatPanelView: View {
         }
         .defaultScrollAnchor(.bottom)
         .frame(height: min(listHeight, maxListHeight))
+        .onScrollGeometryChange(for: HiddenEdges.self) { geometry in
+            let visible = geometry.visibleRect
+            return HiddenEdges(top: visible.minY > 1, bottom: visible.maxY < geometry.contentSize.height - 1)
+        } action: { _, edges in
+            withAnimation(.easeOut(duration: 0.15)) { hiddenEdges = edges }
+        }
         .mask {
-            // Soft edges where messages scroll under the header and composer.
-            LinearGradient(stops: [
-                .init(color: overflowing ? .clear : .black, location: 0),
-                .init(color: .black, location: overflowing ? 0.06 : 0),
-                .init(color: .black, location: 0.96),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
+            // Soft edges only where messages continue out of view, so the newest (or
+            // oldest) bubble is never faded once you've scrolled to it.
+            VStack(spacing: 0) {
+                LinearGradient(colors: [hiddenEdges.top ? .clear : .black, .black], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 18)
+                Rectangle()
+                LinearGradient(colors: [.black, hiddenEdges.bottom ? .clear : .black], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 18)
+            }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.86), value: messages.map(\.id))
     }
+}
+
+struct HiddenEdges: Equatable {
+    var top = false
+    var bottom = false
 }
 
 /// Remembers each conversation's content height between openings.
@@ -191,11 +205,16 @@ private struct ChatHeader: View {
                 }
             }
             Spacer(minLength: 8)
-            HeaderButton(symbol: "arrow.up.forward.app", help: "Open in Messages") { openInMessages() }
-            HeaderButton(symbol: state.panelExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                         help: state.panelExpanded ? "Collapse" : "Expand") {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { state.panelExpanded.toggle() }
+            // One glass capsule holding both buttons.
+            HStack(spacing: 0) {
+                HeaderButton(symbol: "arrow.up.forward.app", help: "Open in Messages") { openInMessages() }
+                HeaderButton(symbol: state.panelExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                             help: state.panelExpanded ? "Collapse" : "Expand") {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { state.panelExpanded.toggle() }
+                }
             }
+            .padding(.horizontal, 2)
+            .glassControl(Capsule(), fallback: .clear)
         }
     }
 
@@ -213,7 +232,8 @@ private struct ChatHeader: View {
 /// Small coloured tag: iMessage (accent) or SMS / RCS (green, like Messages).
 private struct ServiceChip: View {
     let service: String
-    private var isIMessage: Bool { service.lowercased() == "imessage" || service.lowercased() == "any" }
+    static func isIMessage(_ service: String) -> Bool { ["imessage", "any"].contains(service.lowercased()) }
+    private var isIMessage: Bool { Self.isIMessage(service) }
 
     var body: some View {
         Text(isIMessage ? "iMessage" : service.uppercased())
@@ -235,7 +255,7 @@ private struct HeaderButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.primary.opacity(hovering ? 0.9 : 0.6))
+                .foregroundStyle(Color.primary.opacity(hovering ? 0.9 : 0.65))
                 .frame(width: 28, height: 28)
                 .background(Circle().fill(Color.primary.opacity(hovering ? 0.1 : 0)))
                 .contentShape(Circle())
