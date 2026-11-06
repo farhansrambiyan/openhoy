@@ -2,23 +2,41 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleExecutable</key><string>OpenHoy</string>
-    <key>CFBundleIdentifier</key><string>app.openhoy.OpenHoy</string>
-    <key>CFBundleName</key><string>OpenHoy</string>
-    <key>CFBundleDisplayName</key><string>OpenHoy</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.3.0</string>
-    <key>CFBundleVersion</key><string>15</string>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key><string>15.0</string>
-    <key>LSUIElement</key><true/>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>NSAppleEventsUsageDescription</key><string>OpenHoy sends your messages, voice notes and files through the Messages app.</string>
-    <key>NSContactsUsageDescription</key><string>OpenHoy shows names and photos for the people in your menu bar.</string>
-    <key>NSMicrophoneUsageDescription</key><string>OpenHoy records voice notes and narration for screen recordings.</string>
-    <key>NSCameraUsageDescription</key><string>OpenHoy records video notes and shows your face bubble during screen recordings.</string>
-    <key>NSSpeechRecognitionUsageDescription</key><string>OpenHoy transcribes your voice notes as you speak.</string>
-    <key>NSScreenCaptureUsageDescription</key><string>OpenHoy records a window or area of your screen to send.</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenHoy</string>
+	<key>CFBundleExecutable</key>
+	<string>OpenHoy</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.openhoy.OpenHoy</string>
+	<key>CFBundleName</key>
+	<string>OpenHoy</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.4.0</string>
+	<key>CFBundleVersion</key>
+	<string>16</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>OpenHoy sends your messages, voice notes and files through the Messages app.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>OpenHoy records video notes and shows your face bubble during screen recordings.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>OpenHoy shows names and photos for the people in your menu bar.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenHoy records voice notes and narration for screen recordings.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>OpenHoy records a window or area of your screen to send.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>OpenHoy transcribes your voice notes as you speak.</string>
 </dict>
 </plist>
