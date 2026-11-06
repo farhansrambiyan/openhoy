@@ -65,6 +65,7 @@ final class AppState: ObservableObject {
     private var isRefreshing = false
     /// A refresh was requested while one was running; run again when it finishes.
     private var refreshQueued = false
+    private var queuedRefreshForced = false
     private var watcher: DatabaseWatcher?
     /// Safety net in case a file event is missed (e.g. the database is replaced).
     private var fallbackTimer: Timer?
@@ -186,14 +187,18 @@ final class AppState: ObservableObject {
 
     func refresh(force: Bool = false) async {
         guard !isRefreshing else {
+            // Replay once afterwards; only force a full reload if a caller asked for one.
             refreshQueued = true
+            queuedRefreshForced = queuedRefreshForced || force
             return
         }
         isRefreshing = true
         await performRefresh(force: force)
         while refreshQueued {
+            let forced = queuedRefreshForced
             refreshQueued = false
-            await performRefresh(force: true)
+            queuedRefreshForced = false
+            await performRefresh(force: forced)
         }
         isRefreshing = false
     }
@@ -224,6 +229,8 @@ final class AppState: ObservableObject {
                 }
             }
             if access != .granted { access = .granted }
+            // Unread state only changes with the data (markSeen clears it directly).
+            guard changed || force else { return }
             let newestUnread = try await database.newestUnreadRowIDs(chatRowIDs: pinnedChats.flatMap(\.allRowIDs))
             var nextUnread: Set<String> = []
             for chat in pinnedChats {
@@ -300,7 +307,9 @@ final class AppState: ObservableObject {
     // MARK: - People
 
     func person(for chat: ChatSummary) -> Person {
-        if let cached = personCache[chat.guid] { return cached }
+        // Keyed by the group photo too, so a new photo set in Messages shows up.
+        let cacheKey = chat.guid + "|" + (chat.groupPhotoPath ?? "")
+        if let cached = personCache[cacheKey] { return cached }
         let resolver = ContactResolver.shared
         let infos = chat.participants.map { resolver.info(for: $0) }
         let name: String
@@ -325,7 +334,7 @@ final class AppState: ObservableObject {
         let hue = Self.stableHue(chat.guid)
         let person = Person(name: name, firstName: firstName, image: image,
                             initials: initials, hue: hue)
-        personCache[chat.guid] = person
+        personCache[cacheKey] = person
         return person
     }
 

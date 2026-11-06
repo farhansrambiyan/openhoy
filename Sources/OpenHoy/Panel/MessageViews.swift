@@ -37,6 +37,9 @@ struct MessageRow: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
                 .help(message.date.formatted(date: .abbreviated, time: .shortened))
+        } else if let sms = message.isSMS {
+            // Colour each bubble by the service it actually used, like Messages does.
+            bubbleRow.environment(\.isSMSChat, sms)
         } else {
             bubbleRow
         }

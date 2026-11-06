@@ -100,13 +100,6 @@ enum DeliveryState: Hashable, Sendable {
     case notDelivered
     /// OpenHoy couldn't hand it to Messages at all (AppleScript error). Dismissable.
     case failed(String)
-
-    var isFailure: Bool {
-        switch self {
-        case .notDelivered, .failed: return true
-        default: return false
-        }
-    }
 }
 
 struct ChatMessage: Identifiable, Hashable, Sendable {
@@ -129,6 +122,8 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
     var isEdited = false
     /// The sender unsent this message; it renders as a small notice, not a bubble.
     var isUnsent = false
+    /// This message went over SMS / RCS (nil when the database doesn't say).
+    var isSMS: Bool? = nil
 
     var trimmedText: String? {
         guard let text else { return nil }

@@ -29,6 +29,7 @@ actor ChatDatabase {
     let url: URL
     private var db: OpaquePointer?
     private var messageColumns: Set<String> = []
+    private var chatColumns: Set<String> = []
 
     init(url: URL = ChatDatabase.defaultURL) {
         self.url = url
@@ -61,6 +62,7 @@ actor ChatDatabase {
         }
         db = handle
         messageColumns = Set(try rows("PRAGMA table_info(message)") { $0.string(1) ?? "" })
+        chatColumns = Set(try rows("PRAGMA table_info(chat)") { $0.string(1) ?? "" })
     }
 
     func close() {
@@ -85,11 +87,18 @@ actor ChatDatabase {
         }
         // `chat.service_name` is unreliable for `any;-;…` rows (often "SMS" for an iMessage
         // conversation), so the service shown is the one the latest message actually used.
+        // Older or trimmed databases (and the demo one) may lack these columns.
+        let latestService = messageColumns.contains("service")
+            ? """
+              (SELECT NULLIF(m.service, '') FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
+               WHERE j.chat_id = c.ROWID ORDER BY j.message_date DESC LIMIT 1)
+              """
+            : "NULL"
+        let propertiesColumn = chatColumns.contains("properties") ? "c.properties" : "NULL"
         let chatRows = try rows("""
             SELECT c.ROWID, c.guid, c.chat_identifier, c.display_name,
-                   COALESCE((SELECT m.service FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
-                             WHERE j.chat_id = c.ROWID ORDER BY j.message_date DESC LIMIT 1), c.service_name),
-                   MAX(cmj.message_date), c.properties
+                   COALESCE(\(latestService), NULLIF(c.service_name, ''), 'iMessage'),
+                   MAX(cmj.message_date), \(propertiesColumn)
             FROM chat c
             JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
             GROUP BY c.ROWID
@@ -154,12 +163,14 @@ actor ChatDatabase {
         let errorColumn = messageColumns.contains("error") ? "m.error" : "0"
         let deliveredColumn = messageColumns.contains("is_delivered") ? "m.is_delivered" : "1"
         let readColumn = messageColumns.contains("date_read") ? "m.date_read" : "0"
+        let serviceColumn = messageColumns.contains("service") ? "m.service" : "NULL"
 
         struct Raw {
             let rowID: Int64, guid: String, text: String?, isFromMe: Bool, date: Int64, sender: String?
             let assocGUID: String?, assocType: Int, emoji: String?, hasAttachments: Bool, isAudio: Bool, itemType: Int, retracted: Bool
             let replyTo: String?
             let edited: Bool, error: Bool, delivered: Bool, dateRead: Int64
+            let service: String?
         }
 
         // Over-fetch so reactions don't crowd out real messages.
@@ -167,7 +178,7 @@ actor ChatDatabase {
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.is_from_me, m.date, h.id,
                    m.associated_message_guid, m.associated_message_type, \(emojiColumn),
                    m.cache_has_attachments, \(audioColumn), m.item_type, \(retractedColumn), \(threadColumn),
-                   \(editedColumn), \(errorColumn), \(deliveredColumn), \(readColumn)
+                   \(editedColumn), \(errorColumn), \(deliveredColumn), \(readColumn), \(serviceColumn)
             FROM chat_message_join cmj
             JOIN message m ON m.ROWID = cmj.message_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -175,11 +186,12 @@ actor ChatDatabase {
             ORDER BY cmj.message_date DESC, m.ROWID DESC
             LIMIT ?
             """, chatRowIDs.map { .int($0) } + [.int(Int64(limit * 3))]) { s -> Raw in
-            // `attributedBody` is authoritative: newer macOS keeps the full body there, and after
-            // an edit it holds the current version while `text` can be missing, stale or shorter.
+            // After an edit `attributedBody` holds the current version, so it wins. Otherwise keep
+            // the longer of the two: either column can be missing or cut short, and the decoder
+            // is a heuristic that can come back with only part of an unusual body.
             var text = s.string(2)
             if let body = s.data(3), let decoded = AttributedBodyDecoder.decode(body), !decoded.isEmpty {
-                text = decoded
+                if s.int64(15) != 0 || decoded.count >= (text?.count ?? 0) { text = decoded }
             }
             return Raw(rowID: s.int64(0), guid: s.string(1) ?? UUID().uuidString, text: text, isFromMe: s.int64(4) != 0,
                        date: s.int64(5), sender: s.string(6), assocGUID: s.string(7), assocType: Int(s.int64(8)),
@@ -187,7 +199,7 @@ actor ChatDatabase {
                        itemType: Int(s.int64(12)), retracted: s.int64(13) != 0,
                        replyTo: s.string(14).flatMap { $0.isEmpty ? nil : $0 },
                        edited: s.int64(15) != 0, error: s.int64(16) != 0, delivered: s.int64(17) != 0,
-                       dateRead: s.int64(18))
+                       dateRead: s.int64(18), service: s.string(19).flatMap { $0.isEmpty ? nil : $0 })
         }.reversed()
         // A message can be joined to more than one merged row; keep it once.
         var seenGUIDs = Set<String>()
@@ -225,6 +237,7 @@ actor ChatDatabase {
                 reactions: Array((reactionState[r.guid] ?? [:]).values).sorted { $0.kind.rawValue < $1.kind.rawValue },
                 isAudioMessage: r.isAudio)
             message.replyToGUID = r.replyTo
+            message.isSMS = r.service.map { !["imessage", "any"].contains($0.lowercased()) }
             if r.isFromMe { message.delivery = Self.deliveryState(error: r.error, delivered: r.delivered, dateRead: r.dateRead) }
             // Unsent messages keep their row with the body cleared. Older rows only set
             // `date_edited`, so an edited row with nothing left in it counts as unsent too.

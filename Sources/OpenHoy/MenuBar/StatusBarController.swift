@@ -307,10 +307,10 @@ final class AvatarStripView: NSView {
     private var isFanned: Bool { pointerX != nil || dragTarget != nil || entries.contains(where: \.active) }
 
     /// Where each face's centre is heading.
-    private func targetCenters(hovered: Int?) -> [CGFloat] {
+    private func targetCenters(hovered: Int?, fanned: Bool? = nil) -> [CGFloat] {
         let n = entries.count
         guard n > 0 else { return [] }
-        let fanned = isFanned
+        let fanned = fanned ?? isFanned
         var xs = Array(repeating: CGFloat(0), count: n)
         xs[n - 1] = bounds.width - padding - edgeRoom - Self.avatarSize / 2
         for i in stride(from: n - 2, through: 0, by: -1) {
@@ -323,9 +323,10 @@ final class AvatarStripView: NSView {
 
     private func currentCenters() -> [CGFloat] { entries.map { motion[$0.guid]?.x ?? 0 } }
 
-    /// Index of the face under local x, judged against where the faces are drawn right now.
-    private func index(atX x: CGFloat) -> Int? {
-        let xs = currentCenters()
+    /// Index of the face under local x, judged against where the faces are drawn right now
+    /// (or against the given centres).
+    private func index(atX x: CGFloat, centers: [CGFloat]? = nil) -> Int? {
+        let xs = centers ?? currentCenters()
         let n = xs.count
         guard n > 0 else { return nil }
         let d = Self.avatarSize
@@ -361,14 +362,7 @@ final class AvatarStripView: NSView {
     /// Where a face sits once the row has fanned out (what the chat panel anchors to).
     func screenRect(for guid: String) -> NSRect? {
         guard let i = entries.firstIndex(where: { $0.guid == guid }) else { return nil }
-        let fannedTargets: [CGFloat] = {
-            let n = entries.count
-            var xs = Array(repeating: CGFloat(0), count: n)
-            xs[n - 1] = bounds.width - padding - edgeRoom - Self.avatarSize / 2
-            for j in stride(from: n - 2, through: 0, by: -1) { xs[j] = xs[j + 1] - openGap }
-            return xs
-        }()
-        return toScreen(circleRect(center: fannedTargets[i]))
+        return toScreen(circleRect(center: targetCenters(hovered: nil, fanned: true)[i]))
     }
 
     private func toScreen(_ rect: NSRect) -> NSRect {
@@ -379,6 +373,13 @@ final class AvatarStripView: NSView {
     private func hit(local point: NSPoint) -> Hit {
         if isRecording, point.x < padding + recordWidth { return .stopRecording }
         if let i = index(atX: point.x) { return .avatar(entries[i].guid) }
+        // A click while the faces are still spreading out: judge it against where they're
+        // heading (fanned, with room opened around the face under the pointer).
+        let settled = targetCenters(hovered: nil, fanned: true)
+        if let rough = index(atX: point.x, centers: settled),
+           let i = index(atX: point.x, centers: targetCenters(hovered: rough, fanned: true)) {
+            return .avatar(entries[i].guid)
+        }
         return .empty
     }
 
@@ -595,7 +596,10 @@ final class AvatarStripView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         defer {
+            // AppKit doesn't send draggingExited after a drop, so leave the hover state here.
             dragTarget = nil
+            pointerX = nil
+            hovered = nil
             animate()
         }
         guard let guid = dragTarget ?? dragTargetGUID(sender),
@@ -752,17 +756,32 @@ enum AvatarRenderer {
 @MainActor
 final class AvatarImages {
     static let shared = AvatarImages()
-    private var cache: [String: (sharp: CGImage?, soft: CGImage?)] = [:]
+    private final class Pair {
+        let sharp: CGImage?, soft: CGImage?
+        init(sharp: CGImage?, soft: CGImage?) { self.sharp = sharp; self.soft = soft }
+    }
+    /// Photos are keyed by the image object itself (weakly), so a freed image can never be
+    /// mistaken for a new one that happens to reuse its address.
+    private let photos = NSMapTable<NSImage, Pair>.weakToStrongObjects()
+    private var initials: [String: Pair] = [:]
     private let context = CIContext(options: [.useSoftwareRenderer: false])
 
     func images(for person: Person) -> (sharp: CGImage?, soft: CGImage?) {
-        let key = person.image.map { "img:\(ObjectIdentifier($0).hashValue)" } ?? "ini:\(person.initials)|\(person.hue)"
-        if let hit = cache[key] { return hit }
-        if cache.count > 64 { cache.removeAll() }
+        let key = "\(person.initials)|\(person.hue)"
+        if let image = person.image {
+            if let hit = photos.object(forKey: image) { return (hit.sharp, hit.soft) }
+        } else if let hit = initials[key] {
+            return (hit.sharp, hit.soft)
+        }
         let sharp = Self.rasterize(person)
-        let soft = sharp.flatMap(soften)
-        cache[key] = (sharp, soft)
-        return (sharp, soft)
+        let pair = Pair(sharp: sharp, soft: sharp.flatMap(soften))
+        if let image = person.image {
+            photos.setObject(pair, forKey: image)
+        } else {
+            if initials.count > 64 { initials.removeAll() }
+            initials[key] = pair
+        }
+        return (pair.sharp, pair.soft)
     }
 
     /// Square, unclipped, so the blur doesn't pull in transparent edges.
