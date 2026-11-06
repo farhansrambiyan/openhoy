@@ -80,7 +80,7 @@ extension View {
     /// A pressable control on Liquid Glass (macOS 26+); a soft filled shape before that.
     @ViewBuilder
     func glassControl<S: Shape>(_ shape: S, fallback: Color = Color.primary.opacity(0.08)) -> some View {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), Theme.liquidGlass {
             glassEffect(.regular.interactive(), in: shape)
         } else {
             background(shape.fill(fallback))
@@ -90,7 +90,7 @@ extension View {
     /// A non-pressable glass field, such as the composer (macOS 26+); frosted before that.
     @ViewBuilder
     func glassField(cornerRadius: CGFloat) -> some View {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), Theme.liquidGlass {
             glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         } else {
             bubbleSurface(cornerRadius: cornerRadius, shadow: false)
@@ -208,6 +208,9 @@ enum Theme {
         return LinearGradient(colors: stops.count == 1 ? [stops[0], stops[0]] : stops,
                               startPoint: .topLeading, endPoint: .bottomTrailing)
     }
+    /// Offscreen snapshots can't draw Liquid Glass controls, so README screenshot runs
+    /// (OPENHOY_FLAT_GLASS=1) use the frosted fallback instead.
+    static let liquidGlass = ProcessInfo.processInfo.environment["OPENHOY_FLAT_GLASS"] == nil
     static let recordingOrange = Color(red: 0.98, green: 0.55, blue: 0.24)
     // Semantic, so the panel follows light / dark mode.
     static let text = Color.primary.opacity(0.92)
