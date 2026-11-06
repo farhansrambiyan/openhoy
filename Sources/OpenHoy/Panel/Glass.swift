@@ -60,6 +60,54 @@ extension View {
     }
 }
 
+// MARK: - Liquid Glass controls
+
+/// Groups nearby glass controls so they render, blend and morph together (macOS 26+).
+struct GlassGroup<Content: View>: View {
+    var spacing: CGFloat = 8
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) { content }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// A pressable control on Liquid Glass (macOS 26+); a soft filled shape before that.
+    @ViewBuilder
+    func glassControl<S: Shape>(_ shape: S, fallback: Color = Color.primary.opacity(0.08)) -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular.interactive(), in: shape)
+        } else {
+            background(shape.fill(fallback))
+        }
+    }
+
+    /// A non-pressable glass field, such as the composer (macOS 26+); frosted before that.
+    @ViewBuilder
+    func glassField(cornerRadius: CGFloat) -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            bubbleSurface(cornerRadius: cornerRadius, shadow: false)
+        }
+    }
+
+    /// Identity for glass morphing inside a `GlassGroup` (macOS 26+; no-op before).
+    @ViewBuilder
+    func glassID(_ id: String, in namespace: Namespace.ID) -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffectID(id, in: namespace)
+        } else {
+            self
+        }
+    }
+}
+
 // MARK: - Card & bubble surfaces
 
 /// The chat card: Liquid Glass on macOS 26+, a frosted material before that.
@@ -106,6 +154,7 @@ struct BubbleSurface<S: InsettableShape>: ViewModifier {
 struct MessageBubbleStyle: ViewModifier {
     let fromMe: Bool
     var radius: CGFloat = 18
+    @Environment(\.isSMSChat) private var isSMS
 
     func body(content: Content) -> some View {
         let shape = UnevenRoundedRectangle(
@@ -116,7 +165,7 @@ struct MessageBubbleStyle: ViewModifier {
             style: .continuous)
         if fromMe {
             content
-                .background(shape.fill(Theme.bubbleGradient))
+                .background(shape.fill(Theme.sentFill(sms: isSMS)))
                 .overlay(shape.strokeBorder(.white.opacity(0.18), lineWidth: 0.75))
         } else {
             content.bubbleSurface(shape, shadow: false)
@@ -141,16 +190,24 @@ extension View {
 }
 
 enum Theme {
-    /// OpenHoy's accent, taken from the app icon (between its pink and violet).
-    static let accent = Color(red: 0.70, green: 0.20, blue: 0.86)
-    /// The app icon's sunset gradient: orange → pink → violet.
-    static let brandGradient = LinearGradient(
-        colors: [Color(red: 0.98, green: 0.42, blue: 0.22), Color(red: 0.93, green: 0.16, blue: 0.55), Color(red: 0.50, green: 0.22, blue: 0.95)],
-        startPoint: .topLeading, endPoint: .bottomTrailing)
-    /// Softer two-stop version for message bubbles (better text contrast).
-    static let bubbleGradient = LinearGradient(
-        colors: [Color(red: 0.91, green: 0.20, blue: 0.56), Color(red: 0.55, green: 0.24, blue: 0.93)],
-        startPoint: .topLeading, endPoint: .bottomTrailing)
+    /// The theme picked in Settings (kept in sync by `AppState.theme`).
+    nonisolated(unsafe) static var choice: ThemeChoice = .messages
+    static var palette: ThemePalette { choice.palette }
+
+    /// Tint for links, chips, waveforms and outlines.
+    static var accent: Color { Color(nsColor: palette.accent) }
+    /// The send button.
+    static var brandGradient: LinearGradient { gradient(palette.sent) }
+    /// Your message bubbles.
+    static var bubbleGradient: LinearGradient { gradient(palette.sent) }
+    /// Your message bubbles, coloured for the conversation's service (green SMS in Messages).
+    static func sentFill(sms: Bool) -> LinearGradient { gradient(sms ? (palette.sms ?? palette.sent) : palette.sent) }
+
+    private static func gradient(_ colors: [NSColor]) -> LinearGradient {
+        let stops = colors.map { Color(nsColor: $0) }
+        return LinearGradient(colors: stops.count == 1 ? [stops[0], stops[0]] : stops,
+                              startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
     static let recordingOrange = Color(red: 0.98, green: 0.55, blue: 0.24)
     // Semantic, so the panel follows light / dark mode.
     static let text = Color.primary.opacity(0.92)

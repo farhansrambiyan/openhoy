@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import Combine
 import SwiftUI
 
@@ -56,6 +57,7 @@ final class StatusBarController: NSObject {
             state.$openChatGUID.map { _ in () }.eraseToAnyPublisher(),
             state.$contactsVersion.map { _ in () }.eraseToAnyPublisher(),
             state.$recentChats.map { _ in () }.eraseToAnyPublisher(),
+            state.$theme.map { _ in () }.eraseToAnyPublisher(),
             ScreenRecordCoordinator.shared.$isRecording.map { _ in () }.eraseToAnyPublisher()
         )
         .receive(on: RunLoop.main)
@@ -232,8 +234,9 @@ final class AvatarStripView: NSView {
     var entries: [AvatarEntry] = [] {
         didSet {
             guard entries != oldValue else { return }
-            needsDisplay = true
-            onWidthChange?(preferredWidth)
+            if entries.map(\.guid) != oldValue.map(\.guid) { onWidthChange?(preferredWidth) }
+            syncMotion()
+            animate()
         }
     }
     var isRecording = false {
@@ -250,20 +253,39 @@ final class AvatarStripView: NSView {
     /// The status item must follow the strip's width when people are added or removed.
     var onWidthChange: ((CGFloat) -> Void)?
 
-    // Geometry (points): faces side by side with a small gap, always.
+    // Geometry (points). At rest the faces overlap in a clump at the right end; with the
+    // pointer over the row (or a chat open) they fan out into the room reserved for them,
+    // so the status item never changes width and nothing else in the menu bar moves.
     static let avatarSize: CGFloat = 20
-    private let step: CGFloat = 20 + 5
+    private let restGap: CGFloat = 20 * 0.58
+    private let openGap: CGFloat = 20 + 5
+    /// Extra room opened on the hovered face's left. Space only ever opens leftward (the right
+    /// end is pinned), so the face under the pointer never slides out from under it.
+    private let extraGap: CGFloat = 5
     private let padding: CGFloat = 4
+    /// Room for a hovered face's 1.1× scale at the right end.
+    private let edgeRoom: CGFloat = 2
     private var recordWidth: CGFloat { isRecording ? 30 : 0 }
+
+    private struct Motion {
+        var x: CGFloat = 0, vx: CGFloat = 0
+        var scale: CGFloat = 1, vScale: CGFloat = 0
+        var focus: CGFloat = 0, vFocus: CGFloat = 0
+        var ring: CGFloat = 0, vRing: CGFloat = 0
+    }
+    private var motion: [String: Motion] = [:]
+    /// Local x of the pointer (or a drag) while it is over the strip.
+    private var pointerX: CGFloat?
+    private var link: CADisplayLink?
+    private var lastTick: CFTimeInterval = 0
 
     private var hovered: String? {
         didSet {
             guard hovered != oldValue else { return }
-            needsDisplay = true
             onHover?(hovered)
         }
     }
-    private var dragTarget: String? { didSet { if dragTarget != oldValue { needsDisplay = true } } }
+    private var dragTarget: String?
     private var trackingArea: NSTrackingArea?
 
     override init(frame: NSRect) {
@@ -278,27 +300,75 @@ final class AvatarStripView: NSView {
 
     var preferredWidth: CGFloat {
         if entries.isEmpty { return 26 + recordWidth }
-        return padding * 2 + recordWidth + Self.avatarSize + CGFloat(entries.count - 1) * step
+        let spread = CGFloat(entries.count - 1) * openGap + (entries.count > 1 ? extraGap * 1.7 : 0)
+        return padding * 2 + recordWidth + edgeRoom + Self.avatarSize + spread
     }
 
-    private func avatarRect(_ index: Int) -> NSRect {
-        let d = min(Self.avatarSize, bounds.height)
-        let x = padding + recordWidth + CGFloat(index) * step
-        return NSRect(x: x, y: (bounds.height - d) / 2, width: d, height: d)
+    private var isFanned: Bool { pointerX != nil || dragTarget != nil || entries.contains(where: \.active) }
+
+    /// Where each face's centre is heading.
+    private func targetCenters(hovered: Int?) -> [CGFloat] {
+        let n = entries.count
+        guard n > 0 else { return [] }
+        let fanned = isFanned
+        var xs = Array(repeating: CGFloat(0), count: n)
+        xs[n - 1] = bounds.width - padding - edgeRoom - Self.avatarSize / 2
+        for i in stride(from: n - 2, through: 0, by: -1) {
+            var gap = fanned ? openGap : restGap
+            if let h = hovered, h > 0, i < h { gap += extraGap * exp(-pow(CGFloat(h - 1 - i) / 1.2, 2)) }
+            xs[i] = xs[i + 1] - gap
+        }
+        return xs
     }
 
-    /// Hit slots: each face plus half the gap on either side, full bar height (no dead zones).
-    private func hitSlot(_ index: Int) -> NSRect {
-        let r = avatarRect(index)
-        let gap = step - r.width
-        return NSRect(x: r.minX - gap / 2, y: bounds.minY - 4, width: r.width + gap, height: bounds.height + 8)
+    private func currentCenters() -> [CGFloat] { entries.map { motion[$0.guid]?.x ?? 0 } }
+
+    /// Index of the face under local x, judged against where the faces are drawn right now.
+    private func index(atX x: CGFloat) -> Int? {
+        let xs = currentCenters()
+        let n = xs.count
+        guard n > 0 else { return nil }
+        let d = Self.avatarSize
+        var u: CGFloat
+        if x <= xs[0] {
+            u = (x - xs[0]) / d
+        } else if x >= xs[n - 1] {
+            u = CGFloat(n - 1) + (x - xs[n - 1]) / d
+        } else {
+            u = 0
+            for i in 0..<(n - 1) where x <= xs[i + 1] {
+                u = CGFloat(i) + (x - xs[i]) / max(1, xs[i + 1] - xs[i])
+                break
+            }
+        }
+        guard u >= -0.5, u <= CGFloat(n) - 0.5 else { return nil }
+        return min(n - 1, max(0, Int(u.rounded())))
+    }
+
+    private func hoveredIndex() -> Int? {
+        if let dragTarget { return entries.firstIndex { $0.guid == dragTarget } }
+        guard let pointerX else { return nil }
+        return index(atX: pointerX)
+    }
+
+    private func circleRect(center x: CGFloat, scale: CGFloat = 1) -> NSRect {
+        let d = min(Self.avatarSize, bounds.height) * scale
+        return NSRect(x: x - d / 2, y: (bounds.height - d) / 2, width: d, height: d)
     }
 
     var screenBounds: NSRect { toScreen(bounds) }
 
+    /// Where a face sits once the row has fanned out (what the chat panel anchors to).
     func screenRect(for guid: String) -> NSRect? {
         guard let i = entries.firstIndex(where: { $0.guid == guid }) else { return nil }
-        return toScreen(avatarRect(i))
+        let fannedTargets: [CGFloat] = {
+            let n = entries.count
+            var xs = Array(repeating: CGFloat(0), count: n)
+            xs[n - 1] = bounds.width - padding - edgeRoom - Self.avatarSize / 2
+            for j in stride(from: n - 2, through: 0, by: -1) { xs[j] = xs[j + 1] - openGap }
+            return xs
+        }()
+        return toScreen(circleRect(center: fannedTargets[i]))
     }
 
     private func toScreen(_ rect: NSRect) -> NSRect {
@@ -308,24 +378,115 @@ final class AvatarStripView: NSView {
 
     private func hit(local point: NSPoint) -> Hit {
         if isRecording, point.x < padding + recordWidth { return .stopRecording }
-        for i in entries.indices where hitSlot(i).contains(point) { return .avatar(entries[i].guid) }
+        if let i = index(atX: point.x) { return .avatar(entries[i].guid) }
         return .empty
+    }
+
+    /// The pointer in local coordinates. Status item events can arrive with coordinates
+    /// that don't match the pointer, so the real cursor position is preferred.
+    private func localPointer() -> NSPoint? {
+        guard let window else { return nil }
+        return convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
     }
 
     /// What the user clicked: trust the real pointer position when it's over us; fall back
     /// to the event's own coordinates (e.g. for synthesized events).
     func hit(event: NSEvent?) -> Hit {
-        if let window {
-            let pointer = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-            if bounds.insetBy(dx: -2, dy: -4).contains(pointer) {
-                let h = hit(local: pointer)
-                if h != .empty { return h }
-            }
+        if let pointer = localPointer(), bounds.insetBy(dx: -2, dy: -4).contains(pointer) {
+            let h = hit(local: pointer)
+            if h != .empty { return h }
         }
         if let event, event.window === window {
             return hit(local: convert(event.locationInWindow, from: nil))
         }
         return .empty
+    }
+
+    // MARK: Motion
+
+    private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// New faces start where they belong; removed ones are forgotten.
+    private func syncMotion() {
+        let targets = targetCenters(hovered: hoveredIndex())
+        var next: [String: Motion] = [:]
+        for (i, entry) in entries.enumerated() {
+            var m = motion[entry.guid] ?? Motion(x: targets[i])
+            if motion[entry.guid] == nil, entry.active { m.ring = 1; m.focus = 1 }
+            next[entry.guid] = m
+        }
+        motion = next
+    }
+
+    private func animate() {
+        needsDisplay = true
+        if link == nil, window != nil {
+            let link = displayLink(target: self, selector: #selector(tick(_:)))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+            lastTick = 0
+        }
+        link?.isPaused = false
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { link?.invalidate(); link = nil } else { syncMotion(); animate() }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        guard changed else { return }
+        // Width changes (people added or removed) re-anchor the row: snap instead of sliding.
+        let targets = targetCenters(hovered: hoveredIndex())
+        for (i, entry) in entries.enumerated() { motion[entry.guid]?.x = targets[i] }
+        needsDisplay = true
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = link.timestamp
+        let dt = lastTick == 0 ? 1.0 / 60 : min(1.0 / 30, max(1.0 / 240, now - lastTick))
+        lastTick = now
+        if !step(CGFloat(dt)) {
+            link.isPaused = true
+            lastTick = 0
+        }
+        needsDisplay = true
+    }
+
+    /// Advances every spring one frame. Returns false once everything has settled.
+    private func step(_ dt: CGFloat) -> Bool {
+        let hoveredIdx = hoveredIndex()
+        hovered = hoveredIdx.map { entries[$0].guid }
+        let targets = targetCenters(hovered: hoveredIdx)
+        let snap = reduceMotion
+        var moving = false
+
+        func spring(_ value: inout CGFloat, _ velocity: inout CGFloat, to target: CGFloat, k: CGFloat, zeta: CGFloat) {
+            if snap { value = target; velocity = 0; return }
+            let c = 2 * sqrt(k) * zeta
+            velocity += (-k * (value - target) - c * velocity) * dt
+            value += velocity * dt
+            if abs(value - target) < 0.002 && abs(velocity) < 0.02 {
+                value = target
+                velocity = 0
+            } else {
+                moving = true
+            }
+        }
+
+        for (i, entry) in entries.enumerated() {
+            guard var m = motion[entry.guid] else { continue }
+            let near: CGFloat = hoveredIdx.map { exp(-pow(CGFloat(i - $0) / 1.2, 2)) } ?? 0
+            let isHover = i == hoveredIdx
+            spring(&m.x, &m.vx, to: targets[i], k: 260, zeta: 0.82)
+            spring(&m.scale, &m.vScale, to: isHover ? 1.1 : entry.active ? 1.05 : 1 + 0.04 * near, k: 420, zeta: 0.62)
+            spring(&m.focus, &m.vFocus, to: isHover || entry.active ? 1 : 0.3 * near, k: 300, zeta: 0.95)
+            spring(&m.ring, &m.vRing, to: entry.active || dragTarget == entry.guid ? 1 : 0, k: 300, zeta: 0.9)
+            motion[entry.guid] = m
+        }
+        return moving
     }
 
     // MARK: Drawing
@@ -347,11 +508,23 @@ final class AvatarStripView: NSView {
                 }
                 return
             }
-            for (i, entry) in entries.enumerated() {
-                let isHovered = hovered == entry.guid
-                var rect = avatarRect(i)
-                if isHovered || dragTarget == entry.guid { rect = rect.insetBy(dx: -1.25, dy: -1.25) }
-                AvatarRenderer.draw(entry, emphasized: dragTarget == entry.guid, hovered: isHovered, in: rect)
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+            // Back to front: earlier people sit on top of later ones; the open chat above
+            // them, and the face under the pointer above everything.
+            let hoveredGUID = hovered
+            let order = entries.indices.sorted { a, b in
+                func z(_ i: Int) -> Int {
+                    if entries[i].guid == hoveredGUID { return 1000 }
+                    if entries[i].active { return 900 }
+                    return entries.count - i
+                }
+                return z(a) < z(b)
+            }
+            for i in order {
+                let entry = entries[i]
+                guard let m = motion[entry.guid] else { continue }
+                AvatarRenderer.drawGlass(entry, focus: max(0, min(1, m.focus)), ring: max(0, min(1, m.ring)),
+                                         in: circleRect(center: m.x, scale: m.scale), context: ctx)
             }
         }
     }
@@ -367,12 +540,24 @@ final class AvatarStripView: NSView {
         trackingArea = area
     }
 
-    override func mouseMoved(with event: NSEvent) { updateHover(event) }
-    override func mouseEntered(with event: NSEvent) { updateHover(event) }
-    override func mouseExited(with event: NSEvent) { hovered = nil }
+    override func mouseMoved(with event: NSEvent) { updatePointer() }
+    override func mouseEntered(with event: NSEvent) { updatePointer() }
+    override func mouseExited(with event: NSEvent) {
+        pointerX = nil
+        hovered = nil
+        animate()
+    }
 
-    private func updateHover(_ event: NSEvent) {
-        if case .avatar(let guid) = hit(event: event) { hovered = guid } else { hovered = nil }
+    private func updatePointer() {
+        guard let pointer = localPointer(), bounds.insetBy(dx: -2, dy: -4).contains(pointer) else {
+            pointerX = nil
+            hovered = nil
+            animate()
+            return
+        }
+        pointerX = pointer.x
+        hovered = hoveredIndex().map { entries[$0].guid }
+        animate()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -395,18 +580,24 @@ final class AvatarStripView: NSView {
     }
 
     private func dragUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        pointerX = convert(sender.draggingLocation, from: nil).x
         dragTarget = dragTargetGUID(sender) ?? (entries.count == 1 ? entries[0].guid : nil)
-        hovered = dragTarget
+        animate()
         return dragTarget == nil ? [] : .copy
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         dragTarget = nil
+        pointerX = nil
         hovered = nil
+        animate()
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { dragTarget = nil }
+        defer {
+            dragTarget = nil
+            animate()
+        }
         guard let guid = dragTarget ?? dragTargetGUID(sender),
               let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
                                                                options: [.urlReadingFileURLsOnly: true]) as? [URL],
@@ -416,20 +607,26 @@ final class AvatarStripView: NSView {
     }
 }
 
+#if DEBUG
+/// Test hooks for driving the strip without a real pointer (debug builds only).
+extension AvatarStripView {
+    func debugPointer(_ x: CGFloat?) { pointerX = x }
+    func debugSettle(frames: Int = 180) { for _ in 0..<frames { _ = step(1.0 / 60) } }
+    func debugHit(_ x: CGFloat) -> Hit { hit(local: NSPoint(x: x, y: bounds.midY)) }
+    func debugCenters() -> [CGFloat] { currentCenters() }
+    var debugHovered: String? { hovered }
+}
+#endif
+
 // MARK: - Drawing
 
 enum AvatarRenderer {
-    static let brandGradient = NSGradient(colors: [
-        NSColor(srgbRed: 0.98, green: 0.42, blue: 0.22, alpha: 1),
-        NSColor(srgbRed: 0.93, green: 0.16, blue: 0.55, alpha: 1),
-        NSColor(srgbRed: 0.50, green: 0.22, blue: 0.95, alpha: 1),
-    ])!
-    static let unreadColor = NSColor(srgbRed: 0.93, green: 0.16, blue: 0.55, alpha: 1)
-
-    /// Menu bar faces are plain circles.
-    static func shape(in rect: NSRect) -> NSBezierPath {
-        NSBezierPath(ovalIn: rect)
+    /// Ring around the open conversation, in the current theme.
+    static var ringGradient: NSGradient {
+        let colors = Theme.palette.ringColors
+        return NSGradient(colors: colors.count == 1 ? [colors[0], colors[0]] : colors)!
     }
+    static var unreadColor: NSColor { Theme.palette.unread }
 
     static func drawRecordingBadge(in bounds: NSRect) {
         let r = NSRect(x: bounds.minX + 1, y: (bounds.height - 18) / 2, width: 24, height: 18)
@@ -439,54 +636,85 @@ enum AvatarRenderer {
         NSBezierPath(roundedRect: NSRect(x: r.midX - 3.5, y: r.midY - 3.5, width: 7, height: 7), xRadius: 1.5, yRadius: 1.5).fill()
     }
 
-    static func draw(_ entry: AvatarEntry, emphasized: Bool, hovered: Bool, in rect: NSRect) {
-        let ink = NSColor.labelColor
+    /// One face as a glass lens. Out of focus (`focus` 0) the full-colour photo is softened
+    /// behind a light frost; in focus (1) it is sharp. `ring` fades in the sunset ring that
+    /// marks the open conversation.
+    @MainActor
+    static func drawGlass(_ entry: AvatarEntry, focus f: CGFloat, ring: CGFloat, in rect: NSRect, context ctx: CGContext) {
+        let images = AvatarImages.shared.images(for: entry.person)
 
-        NSGraphicsContext.saveGraphicsState()
-        shape(in: rect).addClip()
-        if let image = entry.person.image {
-            image.draw(in: rect.aspectFill(image.size), from: .zero, operation: .sourceOver, fraction: 1)
-        } else {
-            drawInitials(entry.person, in: rect)
+        // Soft contact shadow so overlapping faces read as stacked.
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -0.5), blur: 1.6, color: NSColor.black.withAlphaComponent(0.35).cgColor)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.6).cgColor)
+        ctx.fillEllipse(in: rect.insetBy(dx: 0.4, dy: 0.4))
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addEllipse(in: rect)
+        ctx.clip()
+        if let sharp = images.sharp { ctx.draw(sharp, in: rect) }
+        if f < 1, let soft = images.soft {
+            ctx.setAlpha(1 - f)
+            ctx.draw(soft, in: rect)
+            ctx.setAlpha(1)
         }
-        NSGraphicsContext.restoreGraphicsState()
+        let space = CGColorSpaceCreateDeviceRGB()
+        // Frost: a faint white wash, brighter at the top, gone once in focus.
+        if f < 1, let frost = CGGradient(colorsSpace: space, colors: [
+            NSColor.white.withAlphaComponent(0.16 * (1 - f)).cgColor,
+            NSColor.white.withAlphaComponent(0.04 * (1 - f)).cgColor,
+        ] as CFArray, locations: [0, 1]) {
+            ctx.drawLinearGradient(frost, start: CGPoint(x: rect.midX, y: rect.maxY), end: CGPoint(x: rect.midX, y: rect.minY), options: [])
+        }
+        // Lens: a specular highlight across the top and light caught in the bottom rim.
+        let lens = 1 - 0.3 * f
+        func glow(at center: CGPoint, radius: CGFloat, squash: CGFloat, alpha: CGFloat) {
+            guard let g = CGGradient(colorsSpace: space, colors: [
+                NSColor.white.withAlphaComponent(alpha).cgColor, NSColor.white.withAlphaComponent(0).cgColor,
+            ] as CFArray, locations: [0, 1]) else { return }
+            ctx.saveGState()
+            ctx.translateBy(x: center.x, y: center.y)
+            ctx.scaleBy(x: 1, y: squash)
+            ctx.drawRadialGradient(g, startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: radius, options: [])
+            ctx.restoreGState()
+        }
+        glow(at: CGPoint(x: rect.midX, y: rect.maxY - rect.height * 0.14), radius: rect.width * 0.5, squash: 0.62, alpha: 0.6 * lens)
+        glow(at: CGPoint(x: rect.midX, y: rect.minY), radius: rect.width * 0.5, squash: 0.5, alpha: 0.22 * lens)
+        ctx.restoreGState()
 
-        NSColor.black.withAlphaComponent(0.12).setStroke()
-        let hairline = shape(in: rect.insetBy(dx: 0.25, dy: 0.25))
-        hairline.lineWidth = 0.5
-        hairline.stroke()
+        // Crisp glass edge, with a faint dark hairline so it holds on light wallpapers.
+        ctx.setLineWidth(0.75)
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.55 * lens).cgColor)
+        ctx.strokeEllipse(in: rect.insetBy(dx: 0.4, dy: 0.4))
+        ctx.setLineWidth(0.5)
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.12).cgColor)
+        ctx.strokeEllipse(in: rect.insetBy(dx: -0.25, dy: -0.25))
 
-        if entry.active || emphasized {
-            // OpenHoy's sunset gradient ring marks the open conversation.
-            if let ctx = NSGraphicsContext.current?.cgContext {
-                ctx.saveGState()
-                let ring = CGPath(ellipseIn: rect.insetBy(dx: 1, dy: 1), transform: nil)
-                    .copy(strokingWithWidth: 2, lineCap: .round, lineJoin: .round, miterLimit: 1)
-                ctx.addPath(ring)
-                ctx.clip()
-                brandGradient.draw(in: rect, angle: -45)
-                ctx.restoreGState()
-            }
-        } else if hovered {
-            // Soft halo on hover.
-            let halo = shape(in: rect.insetBy(dx: -1.2, dy: -1.2))
-            halo.lineWidth = 1.5
-            NSColor.labelColor.withAlphaComponent(0.22).setStroke()
-            halo.stroke()
+        if ring > 0.01 {
+            // A ring in the theme's colour marks the open conversation.
+            ctx.saveGState()
+            ctx.setAlpha(ring)
+            // Just inside the edge, so it never clips against the menu bar's height.
+            let path = CGPath(ellipseIn: rect.insetBy(dx: 0.9, dy: 0.9), transform: nil)
+                .copy(strokingWithWidth: 1.8, lineCap: .round, lineJoin: .round, miterLimit: 1)
+            ctx.addPath(path)
+            ctx.clip()
+            ringGradient.draw(in: rect, angle: -45)
+            ctx.restoreGState()
         }
 
         if entry.unread {
             let dot = NSRect(x: rect.maxX - 5.5, y: rect.maxY - 6.5, width: 7, height: 7)
-            NSGraphicsContext.current?.compositingOperation = .clear
-            NSBezierPath(ovalIn: dot.insetBy(dx: -1.3, dy: -1.3)).fill()
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
-            unreadColor.setFill()
-            NSBezierPath(ovalIn: dot).fill()
+            ctx.setFillColor(NSColor.white.withAlphaComponent(0.9).cgColor)
+            ctx.fillEllipse(in: dot.insetBy(dx: -1.2, dy: -1.2))
+            ctx.setFillColor(unreadColor.cgColor)
+            ctx.fillEllipse(in: dot)
         }
 
         if entry.draft {
             let badge = NSRect(x: rect.maxX - 8, y: rect.minY - 0.5, width: 10, height: 10)
-            ink.setFill()
+            NSColor.labelColor.setFill()
             NSBezierPath(ovalIn: badge).fill()
             if let pencil = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 6, weight: .bold)) {
@@ -497,7 +725,7 @@ enum AvatarRenderer {
         }
     }
 
-    private static func drawInitials(_ person: Person, in rect: NSRect) {
+    static func drawInitials(_ person: Person, in rect: NSRect) {
         let top = NSColor(hue: person.hue, saturation: 0.45, brightness: 0.85, alpha: 1)
         let bottom = NSColor(hue: person.hue, saturation: 0.6, brightness: 0.6, alpha: 1)
         NSGradient(starting: top, ending: bottom)?.draw(in: rect, angle: -90)
@@ -515,6 +743,54 @@ enum AvatarRenderer {
                                       attributes: [.font: font, .foregroundColor: NSColor.white])
         let size = text.size()
         text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+    }
+}
+
+// MARK: - Avatar images
+
+/// Each face rasterized once, plus a softened copy for the out-of-focus glass look.
+@MainActor
+final class AvatarImages {
+    static let shared = AvatarImages()
+    private var cache: [String: (sharp: CGImage?, soft: CGImage?)] = [:]
+    private let context = CIContext(options: [.useSoftwareRenderer: false])
+
+    func images(for person: Person) -> (sharp: CGImage?, soft: CGImage?) {
+        let key = person.image.map { "img:\(ObjectIdentifier($0).hashValue)" } ?? "ini:\(person.initials)|\(person.hue)"
+        if let hit = cache[key] { return hit }
+        if cache.count > 64 { cache.removeAll() }
+        let sharp = Self.rasterize(person)
+        let soft = sharp.flatMap(soften)
+        cache[key] = (sharp, soft)
+        return (sharp, soft)
+    }
+
+    /// Square, unclipped, so the blur doesn't pull in transparent edges.
+    private static func rasterize(_ person: Person, points: CGFloat = 48, scale: CGFloat = 2) -> CGImage? {
+        let pixels = Int(points * scale)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: points, height: points)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        let rect = NSRect(x: 0, y: 0, width: points, height: points)
+        if let image = person.image {
+            image.draw(in: rect.aspectFill(image.size), from: .zero, operation: .copy, fraction: 1)
+        } else {
+            AvatarRenderer.drawInitials(person, in: rect)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
+    }
+
+    private func soften(_ image: CGImage) -> CGImage? {
+        let input = CIImage(cgImage: image)
+        let blurred = input.clampedToExtent()
+            .applyingGaussianBlur(sigma: Double(image.width) / 96 * 5)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.15])
+            .cropped(to: input.extent)
+        return context.createCGImage(blurred, from: input.extent)
     }
 }
 
