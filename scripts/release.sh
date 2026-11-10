@@ -16,7 +16,9 @@ if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
   exit 1
 fi
 
-scripts/build-app.sh
+# Public builds are ad-hoc signed unless SIGN_IDENTITY says otherwise: a personal
+# Apple Development certificate would put its owner's name and email in the download.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/build-app.sh
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent build/OpenHoy.app "$ZIP"
 SHA="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"

@@ -15,9 +15,10 @@ CONFIG="${CONFIG:-release}"
 APP="build/OpenHoy.app"
 if [[ -z "${SIGN_IDENTITY:-}" ]]; then
   IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-  SIGN_IDENTITY="$(grep -m1 -o '"Developer ID Application: [^"]*"' <<<"$IDENTITIES" \
-    || grep -m1 -o '"Apple Development: [^"]*"' <<<"$IDENTITIES" || true)"
-  SIGN_IDENTITY="${SIGN_IDENTITY//\"/}"
+  # Sign by the certificate's SHA-1 hash: the name alone is ambiguous when the same
+  # certificate is in the keychain twice.
+  SIGN_IDENTITY="$( (grep -m1 '"Developer ID Application: ' <<<"$IDENTITIES" \
+    || grep -m1 '"Apple Development: ' <<<"$IDENTITIES" || true) | awk '{print $2}')"
 fi
 IDENTITY="${SIGN_IDENTITY:--}"
 
