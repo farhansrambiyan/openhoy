@@ -152,13 +152,12 @@ final class StatusBarController: NSObject {
             entry.representedObject = chat.guid
             let pinned = state.pinnedGUIDs.contains(chat.guid)
             entry.state = pinned ? .on : .off
-            if !pinned && state.pinnedGUIDs.count >= AppState.maxPinned { entry.action = nil }
             pinMenu.addItem(entry)
         }
         if pinMenu.items.isEmpty {
             pinMenu.addItem(NSMenuItem(title: "No conversations found", action: nil, keyEquivalent: ""))
         }
-        let pinItem = NSMenuItem(title: "Pinned People (\(state.pinnedGUIDs.count)/\(AppState.maxPinned))", action: nil, keyEquivalent: "")
+        let pinItem = NSMenuItem(title: "Pinned People (\(state.pinnedGUIDs.count))", action: nil, keyEquivalent: "")
         pinItem.submenu = pinMenu
         menu.addItem(pinItem)
         menu.addItem(.separator())

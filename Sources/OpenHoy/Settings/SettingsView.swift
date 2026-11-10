@@ -143,9 +143,9 @@ struct SettingsView: View {
     }
 
     private var pinned: some View {
-        SettingsSection(title: "People in your menu bar (\(state.pinnedGUIDs.count)/\(AppState.maxPinned))") {
+        SettingsSection(title: "People in your menu bar (\(state.pinnedGUIDs.count))") {
             if state.pinnedChats.isEmpty {
-                Text("Pin up to \(AppState.maxPinned) conversations below.")
+                Text("Pin conversations below.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             } else {
@@ -196,7 +196,6 @@ struct SettingsView: View {
                     }
                     Spacer()
                     Button("Pin") { state.togglePin(chat) }
-                        .disabled(state.pinnedGUIDs.count >= AppState.maxPinned)
                 }
             }
         }

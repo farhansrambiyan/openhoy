@@ -8,7 +8,7 @@ A menu bar messenger for macOS that runs on **iMessage**. It needs no account, n
 
 ## What it does
 
-- **Your people in the menu bar.** Pin up to nine people. They sit as an overlapping stack of glass avatars that fans out when you hover, and several Messages threads for the same person (iMessage, SMS and older formats) are merged into one. Each avatar shows a dot for unread messages, a ring when that chat is open, and a pencil when you have a draft. Hover to see the name.
+- **Your people in the menu bar.** Pin as many people as you like. They sit as an overlapping stack of glass avatars that fans out when you hover, and several Messages threads for the same person (iMessage, SMS and older formats) are merged into one. Each avatar shows a dot for unread messages, a ring when that chat is open, and a pencil when you have a draft. Hover to see the name.
 - **Click an avatar** to drop down a glass chat card. It has a compact header (photo, name, an iMessage/SMS chip, *Open in Messages* and expand buttons). Your messages are blue (green for SMS), theirs are frosted, and time separators are small chips. Pick another look in **Settings › Appearance**: Messages, System Accent, Graphite, Ocean or Sunset. At the bottom is a single input bar: **+**, *Message Tanya…*, and a round send button. It follows your light or dark mode.
   - **⏎** or the **↑** button sends, **⇧⏎** adds a new line, and **Esc** discards the draft (or closes the panel).
   - 🎙 **Voice notes** (mic button, or **+** › Voice Note) show a live waveform and a live on-device transcript. Press **■** or ⏎ to stop, play it back, then send. The audio goes out as an `.m4a`, and the transcript is sent as a text (you can turn this off).

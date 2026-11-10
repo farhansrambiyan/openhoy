@@ -54,8 +54,6 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(sendTranscripts, forKey: Keys.sendTranscripts) }
     }
 
-    static let maxPinned = 9
-
     private var knownChats: [String: ChatSummary] = [:]
     /// Merged-away chat guid → the conversation guid it now belongs to.
     private var guidAliases: [String: String] = [:]
@@ -168,7 +166,7 @@ final class AppState: ObservableObject {
     func togglePin(_ chat: ChatSummary) {
         if let index = pinnedGUIDs.firstIndex(of: chat.guid) {
             pinnedGUIDs.remove(at: index)
-        } else if pinnedGUIDs.count < Self.maxPinned {
+        } else {
             knownChats[chat.guid] = chat
             pinnedGUIDs.append(chat.guid)
         }
